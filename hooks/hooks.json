@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/is-readonly.sh",
+            "timeout": 5,
+            "statusMessage": "Classifying command..."
+          }
+        ]
+      }
+    ]
+  }
+}

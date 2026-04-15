@@ -1,0 +1,13 @@
+{
+  "name": "readonly-bash-classifier",
+  "version": "1.0.0",
+  "description": "Auto-approves read-only bash commands in Claude Code. Replaces static Bash(...) permission patterns with a smart classifier that handles pipe chains, git/gh subcommand+flag parsing, env var prefixes, and redirections.",
+  "author": {
+    "name": "Sumit Nathany"
+  },
+  "homepage": "https://github.com/sumit-nathany/claude-code-readonly-classifier",
+  "repository": "https://github.com/sumit-nathany/claude-code-readonly-classifier",
+  "license": "MIT",
+  "keywords": ["permissions", "bash", "readonly", "auto-approve", "hooks"],
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "readonly-bash-tools",
+  "owner": {
+    "name": "Sumit Nathany",
+    "url": "https://github.com/sumit-nathany"
+  },
+  "plugins": [
+    {
+      "name": "readonly-bash-classifier",
+      "source": "./",
+      "description": "Auto-approves read-only bash commands via PreToolUse hook",
+      "version": "1.0.0"
+    }
+  ]
+}
