@@ -2,6 +2,8 @@
 
 A Claude Code plugin that auto-approves read-only bash commands, replacing static `Bash(...)` permission patterns with an AST-based classifier.
 
+**Current version:** 1.1.0 — parses every command into an AST via [`shfmt`](https://github.com/mvdan/sh) and inspects every simple command in the tree, including those hidden inside pipes, `&&`/`||`/`;` chains, subshells, command substitution, process substitution, and control-flow bodies. A 115-case test suite (positive + negative-safety + adversarial-input) guards against regressions. See [`bin/test.sh`](bin/test.sh).
+
 ## The Problem
 
 Claude Code prompts for permission on every Bash command not in your `allow` list. The typical workaround — adding 30+ `Bash(pattern*)` rules to `settings.json` — is incomplete, fragile, and unmaintainable:
@@ -71,14 +73,16 @@ Claude Code's Auto Mode approves *everything* in a session (including writes and
 
 ## Installation
 
-### From marketplace
+### Quick install (copy-paste both lines into Claude Code)
 
 ```
 /plugin marketplace add sumit-nathany/claude-code-readonly-classifier
 /plugin install readonly-bash-classifier@readonly-bash-tools
 ```
 
-### For local development / testing
+The first command registers this repo as a marketplace; the second installs the plugin from it. Both together are needed because Claude Code does not currently support true one-click install from arbitrary GitHub repos — the only single-command install path is via the official Anthropic marketplace, which requires review (submission to that marketplace is planned).
+
+### Local development / testing
 
 ```bash
 claude --plugin-dir /path/to/readonly-classifier-plugin
