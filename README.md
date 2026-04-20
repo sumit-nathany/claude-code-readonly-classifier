@@ -111,6 +111,8 @@ Remove any `Bash(...)` patterns from `permissions.allow` in `settings.json` — 
 - `jq` — `brew install jq` / `apt install jq`
 - `shfmt` — `brew install shfmt` / `apt install shfmt` (or see [shfmt releases](https://github.com/mvdan/sh/releases))
 
+A `SessionStart` hook automatically checks for these on the first session after install. If either is missing, you'll see a warning on session start with the correct install command for your OS (Homebrew, apt, dnf, pacman, apk). The plugin stays inactive until deps are installed — Bash commands still work, they just fall through to the normal permission prompt. No auto-install is performed; you remain in control of what gets installed on your machine.
+
 ## Testing
 
 A fixture-based test suite covers 115 cases, split between:

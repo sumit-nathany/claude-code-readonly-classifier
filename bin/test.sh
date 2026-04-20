@@ -202,6 +202,62 @@ check_silent_zero 'JSON with null command'   '{"tool_input":{"command":null}}'
 check_silent_zero 'JSON with empty command'  '{"tool_input":{"command":""}}'
 check_silent_zero 'JSON missing command'     '{"tool_input":{}}'
 
+# ── Dependency-check hook (SessionStart) ──────────────────────────
+# Verify that check-deps.sh behaves correctly in all four states:
+# both deps present; each dep individually missing; both missing.
+CHECK_DEPS="$SCRIPT_DIR/check-deps.sh"
+
+if [[ -x "$CHECK_DEPS" ]]; then
+  # Use a temp HOME so the stamp file doesn't persist between cases.
+  run_deps_case() {
+    local label="$1"
+    local fake_path="$2"
+    local expect_warn="$3"
+    local tmp_home
+    tmp_home=$(mktemp -d)
+    local output
+    output=$(CLAUDE_PLUGIN_DATA="$tmp_home/data" PATH="$fake_path" "$CHECK_DEPS" <<< '{}' 2>&1)
+    local has_warn=no
+    [[ "$output" == *"missing required dependencies"* ]] && has_warn=yes
+    rm -rf "$tmp_home"
+    if [[ "$has_warn" == "$expect_warn" ]]; then
+      PASS=$((PASS + 1))
+    else
+      FAIL=$((FAIL + 1))
+      FAILED_CASES+=("check-deps [$label]: expected warn=$expect_warn, got warn=$has_warn")
+    fi
+  }
+
+  # Stage fake versions of each dep in a tmpdir so we can control what's on PATH.
+  DEPS_TMP=$(mktemp -d)
+  # Only create the link if the real binary exists on this machine.
+  [[ -x "$(command -v jq    2>/dev/null)" ]] && ln -s "$(command -v jq)"    "$DEPS_TMP/jq"
+  [[ -x "$(command -v shfmt 2>/dev/null)" ]] && ln -s "$(command -v shfmt)" "$DEPS_TMP/shfmt"
+
+  # Minimal PATH with basic OS tools but no jq/shfmt — realistic
+  # "fresh machine" simulation.
+  MIN_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+  # jq is in /usr/bin on macOS by default, so "both missing" requires
+  # a PATH that excludes both /usr/bin/jq and any shfmt location.
+  # We use an isolated minimal PATH that is empty of both.
+  EMPTY_DEPS=$(mktemp -d)
+
+  if [[ -e "$DEPS_TMP/jq" && -e "$DEPS_TMP/shfmt" ]]; then
+    run_deps_case 'both present'        "$DEPS_TMP:$MIN_PATH"      'no'
+  fi
+  run_deps_case 'both missing'          "$EMPTY_DEPS:/bin"          'yes'
+  if [[ -e "$DEPS_TMP/jq" ]]; then
+    JQ_ONLY=$(mktemp -d)
+    ln -s "$DEPS_TMP/jq" "$JQ_ONLY/jq"
+    run_deps_case 'only shfmt missing'  "$JQ_ONLY:/bin"             'yes'
+    rm -rf "$JQ_ONLY"
+  fi
+  rm -rf "$EMPTY_DEPS"
+
+  rm -rf "$DEPS_TMP"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────
 echo ""
 echo "──────────────────────────────────────"
