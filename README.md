@@ -65,7 +65,21 @@ If the command fails to parse, the classifier stays silent — the default permi
 
 ## How This Differs From Auto Mode
 
-Claude Code's Auto Mode approves *everything* in a session (including writes and destructive ops), trading safety for speed. This plugin is the opposite: it silently auto-approves *only* provably read-only commands, so writes still prompt. The two compose — keep this installed so that even in normal (non-auto) sessions you're not re-approving `ls`, `grep`, and `git diff` dozens of times a day.
+Claude Code's Auto Mode uses an LLM classifier to decide which actions are safe to auto-run. It is not a blanket "approve everything" switch — but it is probabilistic. Anthropic's own [launch post](https://www.anthropic.com/engineering/claude-code-auto-mode) documents a **17% false-negative rate on real overeager actions**: roughly 1 in 6 genuinely dangerous commands that the classifier should have blocked, it approved and let run. Auto Mode also auto-approves all in-project file writes without calling the classifier at all.
+
+This plugin is deterministic and narrower by design:
+
+|   | Auto Mode | This plugin |
+|---|---|---|
+| Decision model | LLM classifier, per action | Static taxonomy in `is-readonly.sh` |
+| Auto-approves writes? | Yes — in-project writes bypass the classifier; other writes evaluated by LLM | Never. Any write → prompt |
+| Approves shell commands? | Classifier decides (17% FN rate on dangerous actions) | Only if every simple command in the AST is in the read-only taxonomy |
+| Unknown / novel command | Classifier guesses | Prompts |
+| Auditable by reading the code? | Classifier is an LLM | Flat shell script + a jq pipeline |
+
+**The niche:** if you're tired of approving `ls` and `git diff` dozens of times a day, but you don't want an LLM deciding on your behalf whether a write is safe, this plugin is the middle ground. It auto-approves *only* the provably safe bulk (reads, queries, lookups). Anything that can change state — any write, any destructive op, any unknown command — falls through to Claude Code's normal permission flow.
+
+**The two compose.** If you run Auto Mode, install this plugin too — it handles the read-only bulk deterministically (faster, no classifier latency), so Auto Mode's classifier only fires for commands that might actually do something. If you don't run Auto Mode, this plugin gives you most of Auto Mode's ergonomic benefit without the LLM trust surface.
 
 ## Prior Art
 
