@@ -1,7 +1,7 @@
 {
   "name": "readonly-bash-classifier",
-  "version": "1.0.0",
-  "description": "Auto-approves read-only bash commands in Claude Code. Replaces static Bash(...) permission patterns with a smart classifier that handles pipe chains, git/gh subcommand+flag parsing, env var prefixes, and redirections.",
+  "version": "1.1.0",
+  "description": "Auto-approves read-only bash commands in Claude Code. Parses each command into an AST (via shfmt) and classifies every simple command — handles pipes, chains, subshells, command substitution, control flow, env var prefixes, redirections, and git/gh subcommand+flag awareness.",
   "author": {
     "name": "Sumit Nathany"
   },

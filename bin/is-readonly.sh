@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 #
-# is-readonly-command.sh
+# is-readonly.sh
 # Classifies a bash command as read-only or not.
 # Reads JSON from stdin (Claude Code hook format), extracts the command,
 # and outputs a JSON permission decision.
 #
-# If read-only: auto-approve via permissionDecision
-# If uncertain: no output (fall through to normal permission prompt)
+# If every simple command in the AST is read-only → auto-approve.
+# Otherwise (or if the command fails to parse) → no output, fall through
+# to the normal permission prompt.
+#
+# Requires: jq, shfmt
 
-set -euo pipefail
+set -uo pipefail
 
-COMMAND=$(jq -r '.tool_input.command // empty' 2>/dev/null)
+# Read stdin once so we can tolerate invalid JSON gracefully.
+INPUT=$(cat)
+COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 [[ -z "$COMMAND" ]] && exit 0
 
 # ── Known read-only base commands ──────────────────────────────────────
@@ -30,7 +35,7 @@ READONLY_CMDS=(
   # network reads
   ping dig nslookup host curl wget nc nmap traceroute
   # misc read-only
-  echo printf true false test expr bc dc jq yq xmllint
+  echo printf true false test "[" expr bc dc jq yq xmllint xargs tee
   man info help
   # java / build reads
   java javac mvn gradle
@@ -38,7 +43,12 @@ READONLY_CMDS=(
   python python3 pip pip3
   # node reads
   node npm npx yarn bun bunx pnpm
+  # shell builtins that don't modify FS
+  : return break continue exit
 )
+# Note: `tee` and `xargs` are in READONLY_CMDS because they're only dangerous
+# when paired with a write target. Redirection detection on the AST catches
+# `tee file.txt` (the file is an arg, not a redirect) — see explicit check below.
 
 # ── Git subcommands: always read-only (no flags change this) ───────────
 GIT_ALWAYS_READONLY=(
@@ -46,25 +56,12 @@ GIT_ALWAYS_READONLY=(
   rev-parse rev-list name-rev
   ls-files ls-tree ls-remote cat-file diff-tree diff-files
   for-each-ref show-ref count-objects fsck verify-pack
-  grep reflog
+  grep reflog bisect
 )
 
 # ── Git subcommands: read-only ONLY with specific flags ────────────────
-# These need flag-level inspection because some flags mutate state.
-
-# git branch: read-only when listing (no args, -a, -r, -v, -vv, --list, --contains, --merged, etc.)
-#             NOT read-only when: -d, -D, --delete, -m, -M, --move, -c, -C, --copy, or bare name (create)
 GIT_BRANCH_WRITE_FLAGS="-d -D --delete -m -M --move -c -C --copy --set-upstream-to --unset-upstream --edit-description"
-
-# git tag: read-only when listing (no args, -l, --list, -n, --contains, etc.)
-#          NOT read-only when: -d, --delete, -a, -s, -f, or bare name (create)
 GIT_TAG_WRITE_FLAGS="-d --delete -a --annotate -s --sign -f --force"
-
-# git remote: read-only when listing (no args, -v, show, get-url)
-#             NOT read-only when: add, remove, rename, set-url, set-head, prune
-GIT_REMOTE_WRITE_SUBCMDS="add remove rm rename set-url set-head prune set-branches update"
-
-# git stash: only 'stash list' and 'stash show' are read-only
 GIT_STASH_READONLY_SUBCMDS="list show"
 
 # ── Known read-only gh subcommands ─────────────────────────────────────
@@ -79,51 +76,38 @@ READONLY_GH_PATTERNS=(
   "api "
 )
 
-# ── Dangerous patterns that are NEVER read-only ────────────────────────
-DANGEROUS_PATTERNS=(
-  "rm " "rm	" "rmdir " "mv " "cp " "ln "
-  "chmod " "chown " "chgrp "
-  "mkdir " "touch "
-  "tee " "truncate "
-  "kill " "killall " "pkill "
-  "reboot" "shutdown" "halt"
-  "dd " "mkfs" "mount " "umount"
-  "docker run" "docker exec" "docker rm" "docker stop" "docker kill"
-  "kubectl delete" "kubectl apply" "kubectl create" "kubectl patch"
-  "git push" "git commit" "git merge" "git rebase" "git reset"
-  "git checkout" "git switch" "git restore" "git clean" "git rm"
-  "git mv" "git add" "git cherry-pick" "git revert" "git pull"
-  "gh pr create" "gh pr merge" "gh pr close" "gh pr edit"
-  "gh pr review" "gh pr ready" "gh pr comment"
-  "gh issue create" "gh issue close" "gh issue edit"
-  "gh issue comment" "gh issue delete"
-  "gh release create" "gh release delete" "gh release edit"
-  "gh repo create" "gh repo delete" "gh repo edit"
-  "> " ">> "
+# ── Dangerous command names (first-arg match) ──────────────────────────
+# These should never appear as the base command of a read-only segment.
+# Checked before READONLY_CMDS lookup so a collision (e.g. `tee` above,
+# which is listed as read-only but dangerous when writing to a file) is
+# handled by the redirect/arg inspection below, not here.
+DANGEROUS_BASE_CMDS=(
+  rm rmdir mv cp ln
+  chmod chown chgrp
+  mkdir touch
+  truncate
+  kill killall pkill
+  reboot shutdown halt
+  dd mkfs mount umount
+  sudo su doas
 )
 
 # ── Helper: extract git subcommand, skipping global flags ──────────────
-# Handles: git -C <path> subcmd, git --no-pager subcmd, git -c key=val subcmd
 extract_git_subcmd_and_args() {
-  local seg="$1"
-  local words=()
-  read -ra words <<< "$seg"
-
-  local i=1  # skip "git" at index 0
+  local -a words=("$@")
+  local i=1
   while (( i < ${#words[@]} )); do
     case "${words[$i]}" in
       -C|--git-dir|--work-tree|-c)
-        (( i += 2 ))  # skip flag + its argument
+        (( i += 2 ))
         ;;
-      --no-pager|--no-optional-locks|--literal-pathspecs)
-        (( i += 1 ))  # skip single flag
+      --no-pager|--no-optional-locks|--literal-pathspecs|--paginate|--bare|--exec-path)
+        (( i += 1 ))
         ;;
       -*)
-        # Unknown global flag — skip it
         (( i += 1 ))
         ;;
       *)
-        # This is the subcommand
         echo "${words[@]:$i}"
         return
         ;;
@@ -132,7 +116,6 @@ extract_git_subcmd_and_args() {
   echo ""
 }
 
-# ── Helper: check if any word matches a flag list ──────────────────────
 has_any_flag() {
   local args="$1"
   shift
@@ -145,40 +128,24 @@ has_any_flag() {
   return 1
 }
 
-# ── Helper: check if a single simple command is read-only ──────────────
-is_segment_readonly() {
-  local seg="$1"
+# ── Helper: classify one simple command (array of args) ────────────────
+# Returns 0 (read-only) or 1 (not read-only / unknown).
+is_simple_cmd_readonly() {
+  local -a args=("$@")
+  (( ${#args[@]} == 0 )) && return 0
 
-  # Strip leading whitespace and env var assignments (FOO=bar cmd ...)
-  seg=$(echo "$seg" | sed 's/^[[:space:]]*//')
-  while [[ "$seg" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
-    seg=$(echo "$seg" | sed 's/^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]*//')
+  local base="${args[0]}"
+
+  # Dangerous base commands — never read-only
+  for bad in "${DANGEROUS_BASE_CMDS[@]}"; do
+    [[ "$base" == "$bad" ]] && return 1
   done
 
-  # Extract the base command (first word)
-  local base
-  base=$(echo "$seg" | awk '{print $1}')
-  [[ -z "$base" ]] && return 0
-
-  # Check for dangerous patterns first
-  for pattern in "${DANGEROUS_PATTERNS[@]}"; do
-    if [[ "$seg" == *"$pattern"* ]]; then
-      return 1
-    fi
-  done
-
-  # Check for output redirection to files (not /dev/null, not stderr)
-  if echo "$seg" | grep -qE '(^|[^2&])[>]' 2>/dev/null; then
-    if ! echo "$seg" | grep -qE '>[>]?\s*/dev/null' 2>/dev/null; then
-      return 1
-    fi
-  fi
-
-  # ── git special handling ──
+  # ── git ──
   if [[ "$base" == "git" ]]; then
     local subcmd_and_args
-    subcmd_and_args=$(extract_git_subcmd_and_args "$seg")
-    [[ -z "$subcmd_and_args" ]] && return 0  # bare "git" is safe
+    subcmd_and_args=$(extract_git_subcmd_and_args "${args[@]}")
+    [[ -z "$subcmd_and_args" ]] && return 0
 
     local subcmd
     subcmd=$(echo "$subcmd_and_args" | awk '{print $1}')
@@ -189,21 +156,16 @@ is_segment_readonly() {
       subcmd_args=$(echo "$subcmd_and_args" | cut -d' ' -f2-)
     fi
 
-    # Always read-only subcommands
     for ro in "${GIT_ALWAYS_READONLY[@]}"; do
       [[ "$subcmd" == "$ro" ]] && return 0
     done
 
-    # git branch — read-only only if no write flags and no bare branch name (create)
     if [[ "$subcmd" == "branch" ]]; then
       local branch_write_flags
       read -ra branch_write_flags <<< "$GIT_BRANCH_WRITE_FLAGS"
       if has_any_flag "$subcmd_args" "${branch_write_flags[@]}"; then
         return 1
       fi
-      # Check for bare branch name creation: `git branch <name>`
-      # Read-only flags that consume the NEXT word as their argument:
-      local branch_flags_with_arg="--contains --no-contains --merged --no-merged --points-at --sort --format -u --set-upstream-to"
       local skip_next=false
       for word in $subcmd_args; do
         if [[ "$skip_next" == true ]]; then
@@ -212,25 +174,22 @@ is_segment_readonly() {
         fi
         case "$word" in
           --contains|--no-contains|--merged|--no-merged|--points-at|--sort|--format)
-            skip_next=true  # next word is the flag's argument, not a branch name
+            skip_next=true
             continue
             ;;
-          -*) continue ;;  # other flags are ok
-          *) return 1 ;;   # bare word = branch name = creating a branch
+          -*) continue ;;
+          *) return 1 ;;
         esac
       done
       return 0
     fi
 
-    # git tag — read-only only if no write flags and no bare tag name (create)
     if [[ "$subcmd" == "tag" ]]; then
       local tag_write_flags
       read -ra tag_write_flags <<< "$GIT_TAG_WRITE_FLAGS"
       if has_any_flag "$subcmd_args" "${tag_write_flags[@]}"; then
         return 1
       fi
-      # Read-only forms: git tag, git tag -l, git tag --list, git tag -n, git tag --contains
-      # If there's a bare word that isn't after -l/--list, it could be creating a tag
       local prev_was_list=false
       for word in $subcmd_args; do
         case "$word" in
@@ -243,96 +202,136 @@ is_segment_readonly() {
             continue
             ;;
           *)
-            # Bare word: if previous was a filter flag, this is its argument (ok)
             if [[ "$prev_was_list" == true ]]; then
               prev_was_list=false
               continue
             fi
-            return 1  # bare word without context = creating a tag
+            return 1
             ;;
         esac
       done
       return 0
     fi
 
-    # git remote — read-only only for listing / show / get-url
     if [[ "$subcmd" == "remote" ]]; then
       local remote_subcmd
       remote_subcmd=$(echo "$subcmd_args" | awk '{print $1}')
-      # No subcommand (bare `git remote`) or `-v` = listing = read-only
       [[ -z "$remote_subcmd" || "$remote_subcmd" == "-v" || "$remote_subcmd" == "--verbose" ]] && return 0
-      # Explicit read-only subcmds
       [[ "$remote_subcmd" == "show" || "$remote_subcmd" == "get-url" ]] && return 0
-      # Everything else is a write subcmd
       return 1
     fi
 
-    # git stash — only 'list' and 'show' are read-only
     if [[ "$subcmd" == "stash" ]]; then
       local stash_subcmd
       stash_subcmd=$(echo "$subcmd_args" | awk '{print $1}')
       for ro in $GIT_STASH_READONLY_SUBCMDS; do
         [[ "$stash_subcmd" == "$ro" ]] && return 0
       done
-      return 1  # bare `git stash` = stash push = not read-only
+      return 1
     fi
 
-    # git config — read-only only with --get, --get-all, --list, -l
     if [[ "$subcmd" == "config" ]]; then
-      if echo "$subcmd_args" | grep -qE '\-\-(get|get-all|get-regexp|list)|-l' 2>/dev/null; then
+      if echo "$subcmd_args" | grep -qE '\-\-(get|get-all|get-regexp|list)|(^| )-l( |$)' 2>/dev/null; then
         return 0
       fi
       return 1
     fi
 
-    # git fetch — read-only (downloads but doesn't modify working tree)
-    if [[ "$subcmd" == "fetch" ]]; then
-      return 0
-    fi
+    [[ "$subcmd" == "fetch" ]] && return 0
 
-    # Unrecognized git subcommand — not read-only
     return 1
   fi
 
-  # ── gh special handling ──
+  # ── gh ──
   if [[ "$base" == "gh" ]]; then
+    local joined="${args[*]}"
     for pattern in "${READONLY_GH_PATTERNS[@]}"; do
-      if [[ "$seg" == *"$pattern"* ]]; then
+      if [[ "$joined" == *"$pattern"* ]]; then
         return 0
       fi
     done
     return 1
   fi
 
-  # Check against the known read-only commands
+  # ── tee / xargs need special handling ──
+  # `tee file.txt` writes to file.txt (the filename is an arg, not a redirect).
+  # `tee` with no args, or `tee -a`/options only, writes to stdout — safe.
+  # Simplest policy: tee with any non-flag arg → prompt.
+  if [[ "$base" == "tee" ]]; then
+    for arg in "${args[@]:1}"; do
+      [[ "$arg" == -* ]] && continue
+      return 1
+    done
+    return 0
+  fi
+  # `xargs <cmd>` runs arbitrary commands — we can't easily re-classify the
+  # inner command from here, so prompt to be safe.
+  if [[ "$base" == "xargs" ]]; then
+    for arg in "${args[@]:1}"; do
+      [[ "$arg" == -* ]] && continue
+      return 1
+    done
+    return 0
+  fi
+
+  # ── Generic allowlist ──
   for cmd in "${READONLY_CMDS[@]}"; do
-    if [[ "$base" == "$cmd" ]]; then
-      return 0
-    fi
+    [[ "$base" == "$cmd" ]] && return 0
   done
 
-  # Not recognized — not read-only
   return 1
 }
 
-# ── Main: split on pipes and check every segment ──────────────────────
+# ── Parse command with shfmt ──────────────────────────────────────────
+AST=$(printf '%s' "$COMMAND" | shfmt -tojson 2>/dev/null) || {
+  # Parse failure → fall through to prompt
+  exit 0
+}
 
-# Split on |, &&, ;, || and check each segment
-SEGMENTS=$(echo "$COMMAND" | sed 's/[|][ ]*[|]/\n/g; s/[|]/\n/g; s/&&/\n/g; s/;/\n/g')
+# ── Reject disallowed redirects ──────────────────────────────────────
+# Ops: 63=`>`, 64=`>>`, 65=`<`, 66=`<<` (heredoc), 68=`>&`/`<&`, 73=`<<<`
+# Write ops (63, 64) to anything other than /dev/null → not read-only.
+DISALLOWED_REDIR=$(echo "$AST" | jq -r '
+  [.. | objects | .Redirs? // empty | .[]
+   | select(.Op == 63 or .Op == 64)
+   | (.Word.Parts[0].Value // .Word.Parts[0].Lit // "?")
+   | select(. != "/dev/null")
+  ] | length
+' 2>/dev/null) || DISALLOWED_REDIR=0
+
+if [[ "${DISALLOWED_REDIR:-0}" -gt 0 ]]; then
+  exit 0
+fi
+
+# ── Walk every CallExpr in the AST ───────────────────────────────────
+# Each CallExpr is one simple command (after env-var assignments, which
+# shfmt separates into .Assigns). Output: one line per CallExpr, args
+# separated by NUL for safe re-parsing.
+
+CALLEXPRS=$(echo "$AST" | jq -r '
+  [.. | objects | select(.Type == "CallExpr")
+   | [.Args[]? | (.Parts[0].Value // .Parts[0].Lit // "?")]
+   | select(length > 0)
+   | @tsv
+  ] | .[]
+' 2>/dev/null) || exit 0
+
+# No CallExprs found (e.g. bare `{ }` block or assignment-only) → treat
+# as safe (nothing executes). This is conservative and matches shfmt's view.
+if [[ -z "$CALLEXPRS" ]]; then
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"No executable commands"}}'
+  exit 0
+fi
 
 ALL_READONLY=true
-while IFS= read -r segment; do
-  segment=$(echo "$segment" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  [[ -z "$segment" ]] && continue
-
-  if ! is_segment_readonly "$segment"; then
+while IFS=$'\t' read -r -a cmd_args; do
+  (( ${#cmd_args[@]} == 0 )) && continue
+  if ! is_simple_cmd_readonly "${cmd_args[@]}"; then
     ALL_READONLY=false
     break
   fi
-done <<< "$SEGMENTS"
+done <<< "$CALLEXPRS"
 
 if [[ "$ALL_READONLY" == "true" ]]; then
-  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Read-only command auto-approved"}}'
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Read-only command auto-approved (AST)"}}'
 fi
-
-# If not read-only, output nothing — falls through to normal permission flow
